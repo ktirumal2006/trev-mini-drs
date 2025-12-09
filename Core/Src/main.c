@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "drs_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -41,11 +41,21 @@
 
 /* Private variables ---------------------------------------------------------*/
 CAN_HandleTypeDef hcan1;
-
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+/* CAN loopback test variables */
+CAN_TxHeaderTypeDef TxHeader;
+uint8_t  TxData[8];
+uint32_t TxMailbox;
 
+/* DRS scheduler variables */
+static uint32_t last_drs_tick_ms = 0;
+static const uint32_t DRS_TICK_INTERVAL_MS = 10;
+
+/* Fake input generator variables */
+static float fake_speed_kph = 0.0f;
+static bool speed_ramp_up = true;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -54,7 +64,9 @@ static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_CAN1_Init(void);
 /* USER CODE BEGIN PFP */
-
+static void CAN_Loopback_Test_Start(void);
+static void FakeInputs_Generate(void);
+static void DrsApp_UpdateLED(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -68,9 +80,7 @@ static void MX_CAN1_Init(void);
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
-
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -79,22 +89,28 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_CAN1_Init();
-  /* USER CODE BEGIN 2 */
 
+  /* USER CODE BEGIN 2 */
+  /* Start simple CAN internal loopback test */
+  CAN_Loopback_Test_Start();
+  
+  /* Initialize DRS controller */
+  DrsApp_Init();
+  
+  /* Initialize scheduler */
+  last_drs_tick_ms = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -104,6 +120,20 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* 10ms DRS scheduler */
+    uint32_t current_time_ms = HAL_GetTick();
+    if ((current_time_ms - last_drs_tick_ms) >= DRS_TICK_INTERVAL_MS) {
+      /* Generate fake inputs */
+      FakeInputs_Generate();
+      
+      /* Run DRS controller tick */
+      DrsApp_Tick10ms();
+      
+      /* Update LED based on DRS state */
+      DrsApp_UpdateLED();
+      
+      last_drs_tick_ms = current_time_ms;
+    }
   }
   /* USER CODE END 3 */
 }
@@ -175,17 +205,15 @@ void SystemClock_Config(void)
   */
 static void MX_CAN1_Init(void)
 {
-
   /* USER CODE BEGIN CAN1_Init 0 */
-
   /* USER CODE END CAN1_Init 0 */
 
   /* USER CODE BEGIN CAN1_Init 1 */
-
   /* USER CODE END CAN1_Init 1 */
+
   hcan1.Instance = CAN1;
   hcan1.Init.Prescaler = 16;
-  hcan1.Init.Mode = CAN_MODE_NORMAL;
+  hcan1.Init.Mode = CAN_MODE_LOOPBACK;          // Loopback mode for self-test
   hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
   hcan1.Init.TimeSeg1 = CAN_BS1_1TQ;
   hcan1.Init.TimeSeg2 = CAN_BS2_1TQ;
@@ -199,10 +227,9 @@ static void MX_CAN1_Init(void)
   {
     Error_Handler();
   }
+
   /* USER CODE BEGIN CAN1_Init 2 */
-
   /* USER CODE END CAN1_Init 2 */
-
 }
 
 /**
@@ -212,14 +239,12 @@ static void MX_CAN1_Init(void)
   */
 static void MX_USART2_UART_Init(void)
 {
-
   /* USER CODE BEGIN USART2_Init 0 */
-
   /* USER CODE END USART2_Init 0 */
 
   /* USER CODE BEGIN USART2_Init 1 */
-
   /* USER CODE END USART2_Init 1 */
+
   huart2.Instance = USART2;
   huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
@@ -234,10 +259,9 @@ static void MX_USART2_UART_Init(void)
   {
     Error_Handler();
   }
+
   /* USER CODE BEGIN USART2_Init 2 */
-
   /* USER CODE END USART2_Init 2 */
-
 }
 
 /**
@@ -248,8 +272,8 @@ static void MX_USART2_UART_Init(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
 
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
@@ -268,11 +292,148 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(LD3_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+
+/**
+  * @brief  Generate fake inputs for DRS testing.
+  *         Ramps speed from 0 to 60 kph and back over ~10 seconds.
+  */
+static void FakeInputs_Generate(void)
+{
+  const float SPEED_RAMP_RATE_KPH_PER_TICK = 0.06f;  // 0.06 kph per 10ms tick = 6 kph/sec
+  const float MAX_SPEED_KPH = 60.0f;
+  const float MIN_SPEED_KPH = 0.0f;
+  
+  /* Ramp speed up and down */
+  if (speed_ramp_up) {
+    fake_speed_kph += SPEED_RAMP_RATE_KPH_PER_TICK;
+    if (fake_speed_kph >= MAX_SPEED_KPH) {
+      fake_speed_kph = MAX_SPEED_KPH;
+      speed_ramp_up = false;
+    }
+  } else {
+    fake_speed_kph -= SPEED_RAMP_RATE_KPH_PER_TICK;
+    if (fake_speed_kph <= MIN_SPEED_KPH) {
+      fake_speed_kph = MIN_SPEED_KPH;
+      speed_ramp_up = true;
+    }
+  }
+  
+  /* Set inputs: enable=true, brake=false, speed from ramp, ext_fault=false */
+  DrsApp_SetInputs(true, false, fake_speed_kph, false);
+}
+
+/**
+  * @brief  Update LED based on DRS state.
+  *         OPEN -> LED ON, CLOSED/OPENING/CLOSING -> LED OFF
+  */
+static void DrsApp_UpdateLED(void)
+{
+  DrsState_C state = DrsApp_GetState();
+  
+  if (state == DRS_STATE_OPEN) {
+    HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
+  } else {
+    /* CLOSED, OPENING, or CLOSING -> LED OFF */
+    HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+  }
+}
+
+/**
+  * @brief  Configure filter, start CAN and send one test frame in loopback.
+  */
+static void CAN_Loopback_Test_Start(void)
+{
+  CAN_FilterTypeDef sFilterConfig;
+
+  /* Accept all IDs into FIFO0 */
+  sFilterConfig.FilterBank = 0;
+  sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
+  sFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
+  sFilterConfig.FilterIdHigh = 0x0000;
+  sFilterConfig.FilterIdLow = 0x0000;
+  sFilterConfig.FilterMaskIdHigh = 0x0000;
+  sFilterConfig.FilterMaskIdLow = 0x0000;
+  sFilterConfig.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+  sFilterConfig.FilterActivation = ENABLE;
+  sFilterConfig.SlaveStartFilterBank = 14; // not critical for single CAN instance
+
+  if (HAL_CAN_ConfigFilter(&hcan1, &sFilterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_CAN_Start(&hcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* Enable RX FIFO0 message pending interrupt */
+  if (HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* Prepare a test frame: ID 0x123, 8 data bytes {1..8} */
+  TxHeader.StdId = 0x123;
+  TxHeader.IDE   = CAN_ID_STD;
+  TxHeader.RTR   = CAN_RTR_DATA;
+  TxHeader.DLC   = 8;
+  TxHeader.TransmitGlobalTime = DISABLE;   // valid for L4 HAL
+
+  TxData[0] = 1;
+  TxData[1] = 2;
+  TxData[2] = 3;
+  TxData[3] = 4;
+  TxData[4] = 5;
+  TxData[5] = 6;
+  TxData[6] = 7;
+  TxData[7] = 8;
+
+  if (HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief  CAN RX FIFO0 message pending callback.
+  *         This will be called in loopback mode when our own frame is received.
+  */
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+  CAN_RxHeaderTypeDef RxHeader;
+  uint8_t RxData[8];
+
+  if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* Check that we received exactly what we sent */
+  if (RxHeader.StdId == 0x123 &&
+      RxHeader.DLC   == 8     &&
+      RxData[0] == 1 &&
+      RxData[1] == 2 &&
+      RxData[2] == 3 &&
+      RxData[3] == 4 &&
+      RxData[4] == 5 &&
+      RxData[5] == 6 &&
+      RxData[6] == 7 &&
+      RxData[7] == 8)
+  {
+    /* Success: turn LED ON */
+    HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
+  }
+  else
+  {
+    /* Fail / unexpected frame: turn LED OFF */
+    HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+  }
+}
 
 /* USER CODE END 4 */
 
@@ -283,13 +444,13 @@ static void MX_GPIO_Init(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
   /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
@@ -301,8 +462,6 @@ void Error_Handler(void)
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

@@ -1,4 +1,4 @@
-#include "inc/DRSController.hpp"
+#include "DRSController.hpp"
 
 static inline uint16_t ms_from_ticks(uint16_t ticks_10ms) {
     return (uint16_t)(ticks_10ms * 10u);
